@@ -1,0 +1,1 @@
+pnpm exec wrangler deploy --config wrangler.production.toml

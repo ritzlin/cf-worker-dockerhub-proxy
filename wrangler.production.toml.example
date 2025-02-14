@@ -1,0 +1,5 @@
+name = "cf-worker-dockerhub-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-01-21"
+
+kv_namespaces = [{ binding = "TOKEN_CACHE", id = "your-production-kv-id" }]
