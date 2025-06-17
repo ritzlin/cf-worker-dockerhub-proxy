@@ -1,5 +1,9 @@
 name = "cf-worker-dockerhub-proxy"
 main = "src/index.ts"
-compatibility_date = "2025-01-21"
+compatibility_date = "2025-06-17"
 
 kv_namespaces = [{ binding = "TOKEN_CACHE", id = "${KV_TOKEN_CACHE_ID}" }]
+
+[observability.logs]
+enabled = true
+invocation_logs = false

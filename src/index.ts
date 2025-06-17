@@ -3,10 +3,14 @@ interface Env {
 }
 
 // DockerHub API endpoints
-const DOCKERHUB_AUTH_URL = 'https://auth.docker.io/token';
-const DOCKERHUB_REGISTRY_URL = 'https://registry-1.docker.io';
+const DOCKERHUB_AUTH_URL = "https://auth.docker.io/token";
+const DOCKERHUB_REGISTRY_URL = "https://registry-1.docker.io";
 
-async function getAuthToken(scope: string, env: Env, forceRefresh = false): Promise<string> {
+async function getAuthToken(
+  scope: string,
+  env: Env,
+  forceRefresh = false
+): Promise<string> {
   // Try to get cached token unless force refresh is requested
   if (!forceRefresh) {
     const cachedToken = await env.TOKEN_CACHE.get(scope);
@@ -17,13 +21,13 @@ async function getAuthToken(scope: string, env: Env, forceRefresh = false): Prom
 
   // Get new token from DockerHub
   const params = new URLSearchParams({
-    service: 'registry.docker.io',
+    service: "registry.docker.io",
     scope: scope,
   });
 
   const authResponse = await fetch(`${DOCKERHUB_AUTH_URL}?${params}`, {
     headers: {
-      'Accept': 'application/json',
+      Accept: "application/json",
     },
   });
 
@@ -40,35 +44,40 @@ async function getAuthToken(scope: string, env: Env, forceRefresh = false): Prom
   return token;
 }
 
-async function makeRegistryRequest(url: string, options: RequestInit, scope: string, env: Env): Promise<Response> {
+async function makeRegistryRequest(
+  url: string,
+  options: RequestInit,
+  scope: string,
+  env: Env
+): Promise<Response> {
   // First attempt with potentially cached token
   let token = await getAuthToken(scope, env);
   const headers = new Headers(options.headers || {});
-  headers.set('Authorization', `Bearer ${token}`);
+  headers.set("Authorization", `Bearer ${token}`);
 
   let response = await fetch(url, {
     ...options,
     headers: headers,
-    redirect: 'manual', // Handle redirects manually
+    redirect: "manual", // Handle redirects manually
   });
 
   // Handle 401 with token refresh
   if (response.status === 401) {
     console.log("Token expired, refreshing...");
     token = await getAuthToken(scope, env, true);
-    headers.set('Authorization', `Bearer ${token}`);
+    headers.set("Authorization", `Bearer ${token}`);
     response = await fetch(url, {
       ...options,
       headers: headers,
-      redirect: 'manual',
+      redirect: "manual",
     });
   }
 
   // Handle redirects for blob downloads
   if (response.status === 307 || response.status === 302) {
-    const redirectUrl = response.headers.get('location');
+    const redirectUrl = response.headers.get("location");
     if (!redirectUrl) {
-      throw new Error('Redirect location not found');
+      throw new Error("Redirect location not found");
     }
     response = await fetch(redirectUrl);
   }
@@ -76,13 +85,16 @@ async function makeRegistryRequest(url: string, options: RequestInit, scope: str
   return response;
 }
 
-async function handleRegistryRequest(request: Request, env: Env): Promise<Response> {
+async function handleRegistryRequest(
+  request: Request,
+  env: Env
+): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  const match = path.match(/^\/v2\/(.+?)\/(manifests|blobs)/);
+  const match = path.match(/^\/v2\/(.+)\/(manifests|blobs)/);
   if (!match) {
-    return new Response('Invalid registry request', { status: 400 });
+    return new Response("Invalid registry request", { status: 400 });
   }
 
   const repository = match[1];
@@ -93,68 +105,77 @@ async function handleRegistryRequest(request: Request, env: Env): Promise<Respon
     const dockerHubUrl = `${DOCKERHUB_REGISTRY_URL}${path}`;
     const headers = new Headers(request.headers);
 
-    // Add appropriate accept headers for manifests
-    if (path.includes('/manifests/')) {
-      headers.set('Accept', [
-        'application/vnd.docker.distribution.manifest.v2+json',
-        'application/vnd.docker.distribution.manifest.list.v2+json',
-        'application/vnd.oci.image.manifest.v1+json',
-        'application/vnd.oci.image.index.v1+json'
-      ].join(', '));
-    }
-
-    const response = await makeRegistryRequest(dockerHubUrl, {
-      method: request.method,
-      headers: headers,
-      body: request.body,
-    }, scope, env);
+    const response = await makeRegistryRequest(
+      dockerHubUrl,
+      {
+        method: request.method,
+        headers: headers,
+        // GET/HEAD must never carry a body; on CF Workers (HTTP/2) the
+        // incoming request.body can be a closed ReadableStream instead of
+        // null, which causes fetch() to throw a TypeError.
+        body: request.method === "GET" || request.method === "HEAD" ? null : request.body,
+      },
+      scope,
+      env
+    );
 
     if (!response.ok) {
-      return new Response(`Registry error: ${response.statusText}`, { status: response.status });
+      console.log("error", response.status, response.statusText);
     }
 
     // Forward the response back to client
     const responseHeaders = new Headers(response.headers);
-    responseHeaders.set('Docker-Distribution-Api-Version', 'registry/2.0');
+    responseHeaders.set("Docker-Distribution-Api-Version", "registry/2.0");
 
     return new Response(response.body, {
       status: response.status,
       headers: responseHeaders,
     });
   } catch (error) {
-    return new Response(`Error: ${(error as { message?: string }).message}`, { status: 500 });
+    console.error("handleRegistryRequest failed:", error);
+    return new Response(`Error: ${(error as { message?: string }).message}`, {
+      status: 500,
+    });
   }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Handle preflight requests
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
+    const url = new URL(request.url);
+
+    // Docker mirror health-probe
+    if (
+      url.pathname === "/v2/" &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      console.log("[/v2/ probe] ua=", request.headers.get("user-agent") || "");
+      return new Response("{}", {
+        status: 200,
         headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE',
-          'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range',
-          'Access-Control-Max-Age': '86400',
+          "Docker-Distribution-Api-Version": "registry/2.0",
+          "Content-Type": "application/json; charset=utf-8",
         },
       });
     }
 
-    // Check if this is a registry API request
-    if (request.url.includes('/v2/')) {
+    // Handle preflight requests
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE",
+          "Access-Control-Allow-Headers": "Authorization, Content-Type, Range",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
+    }
+
+    console.log("request", request.url);
+
+    if (url.pathname.startsWith("/v2/")) {
       return handleRegistryRequest(request, env);
     }
 
-    // Handle version check
-    if (request.url.endsWith('/v2/')) {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          'Docker-Distribution-Api-Version': 'registry/2.0',
-        },
-      });
-    }
-
-    return new Response('Not Found', { status: 404 });
+    return new Response("Not Found", { status: 404 });
   },
 };
