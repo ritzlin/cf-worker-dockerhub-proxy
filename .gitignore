@@ -5,3 +5,4 @@ node_modules
 .dev.vars
 
 wrangler.production.toml
+wrangler.local.toml
