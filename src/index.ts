@@ -2,6 +2,18 @@ interface Env {
   TOKEN_CACHE: any;
 }
 
+// Carries an upstream HTTP status so the catch block can propagate it
+// instead of collapsing every failure into 500.
+class RegistryError extends Error {
+  status: number;
+  retryAfter: string | null;
+  constructor(message: string, status: number, retryAfter: string | null) {
+    super(message);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
 // DockerHub API endpoints
 const DOCKERHUB_AUTH_URL = "https://auth.docker.io/token";
 const DOCKERHUB_REGISTRY_URL = "https://registry-1.docker.io";
@@ -32,7 +44,11 @@ async function getAuthToken(
   });
 
   if (!authResponse.ok) {
-    throw new Error(`Failed to get auth token: ${authResponse.statusText}`);
+    throw new RegistryError(
+      `Failed to get auth token: ${authResponse.statusText}`,
+      authResponse.status,
+      authResponse.headers.get("Retry-After")
+    );
   }
 
   const authData: { token: string } = await authResponse.json();
@@ -133,9 +149,30 @@ async function handleRegistryRequest(
     });
   } catch (error) {
     console.error("handleRegistryRequest failed:", error);
-    return new Response(`Error: ${(error as { message?: string }).message}`, {
-      status: 500,
+
+    // Propagate the upstream status when available; otherwise 500.
+    const status = error instanceof RegistryError ? error.status : 500;
+    const responseHeaders = new Headers({
+      "Content-Type": "application/json",
+      "Docker-Distribution-Api-Version": "registry/2.0",
     });
+
+    // Forward the Retry-After the upstream sent, or default for 429/503.
+    // Docker's client honours Retry-After and will back off + retry.
+    if (error instanceof RegistryError && error.retryAfter) {
+      responseHeaders.set("Retry-After", error.retryAfter);
+    } else if (status === 429 || status === 503) {
+      responseHeaders.set("Retry-After", "60");
+    }
+
+    // OCI distribution error envelope — Docker parses this on GET
+    // responses and surfaces the message to the user.
+    const message =
+      error instanceof Error ? error.message : "unknown error";
+    return new Response(
+      JSON.stringify({ errors: [{ code: "UNKNOWN", message }] }),
+      { status, headers: responseHeaders }
+    );
   }
 }
 
